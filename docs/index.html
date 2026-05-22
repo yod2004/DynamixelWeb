@@ -5,9 +5,22 @@
   <title>DynamixelWeb</title>
 </head>
 <body>
-  <button id="connectBtn">ポート選択</button>
-  <button id="ledOnBtn">LED ON</button>
-  <button id="ledOffBtn">LED OFF</button>
+  <button id="connectBtn">CONNECT USB</button>
+  <fieldset>
+    <legend>MOTOR1</legend>
+    <label>ID:<input type="number" id="motor1Id" value="1" min="1" max="253" style="width: 50px;"></label>
+    <label>LED:</label><input type="checkbox" id="isMotor1Led"/>
+    <label>ENABLE:</label><input type="checkbox" id="isMotor1Enable"/>
+    <label>SPEED:</label><input type="range" min="-10" max="10" id="motor1Speed"/>
+  </fieldset>
+  
+  <fieldset>
+    <legend>MOTOR2</legend>
+    <label>ID:<input type="number" id="motor2Id" value="2" min="1" max="253" style="width: 50px;"></label>
+    <label>LED:<input type="checkbox" id="isMotor2Led"/>
+    <label>ENABLE:</label><input type="checkbox" id="isMotor2Enable"/>
+    <label>SPEED:</label><input type="range" min="-10" max="10" id="motor2Speed"/>
+  </fieldset>
 
   <script>
     let port;
