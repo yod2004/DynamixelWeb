@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>DynamixelWeb</title>
+</head>
+<body>
+  <button id="connectBtn">ポート選択</button>
+  <button id="ledOnBtn">LED ON</button>
+  <button id="ledOffBtn">LED OFF</button>
+
+  <script>
+    let port;
+    let writer;
+
+    // 1. 接続処理（ここでのみポップアップが出ます）
+    document.getElementById('connectBtn').addEventListener('click', async () => {
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 57600 }); // XC330の初期ボーレート
+        writer = port.writable.getWriter();
+        console.log("接続完了");
+        alert("接続完了");
+      } catch (error) {
+        console.error("接続エラー:", error);
+      }
+    });
+
+    // 2. コマンド送信処理
+    async function sendWriteCommand(id, address, dataValue) {
+      if (!writer) {
+        alert("書き込み先が見つかりません");
+        return;
+      }
+
+      // Protocol 2.0 パケット構築 (1バイト書き込み用)
+      const payload = new Uint8Array([
+        0xFF, 0xFF, 0xFD, 0x00, // Header
+        id,                     // ID
+        0x06, 0x00,             // Length (Instruction + Address + Data + CRC = 6)
+        0x03,                   // Instruction (Write)
+        address, 0x00,          // Address
+        dataValue               // Data
+      ]);
+
+      const crc = calculateDynamixelCRC(payload);
+      const packet = new Uint8Array(payload.length + 2);
+      packet.set(payload);
+      packet[payload.length]     = crc & 0xFF;
+      packet[payload.length + 1] = (crc >> 8) & 0xFF;
+
+      // 送信（ポートは閉じずに維持する）
+      await writer.write(packet);
+      console.log(`アドレス ${address} に ${dataValue} を送信しました`);
+    }
+
+    // 各ボタンのイベント
+    document.getElementById('ledOnBtn').addEventListener('click', () => {
+      sendWriteCommand(1, 0x41, 0x01); // ID:1, Address:65(0x41), Data:1
+    });
+
+    document.getElementById('ledOffBtn').addEventListener('click', () => {
+      sendWriteCommand(1, 0x41, 0x00); // ID:1, Address:65(0x41), Data:0
+    });
+
+    // CRC-16 計算関数
+    function calculateDynamixelCRC(data) {
+      let crc = 0;
+      for (let i = 0; i < data.length; i++) {
+        crc ^= (data[i] << 8);
+        for (let j = 0; j < 8; j++) {
+          if ((crc & 0x8000) !== 0) {
+            crc = ((crc << 1) ^ 0x8005) & 0xFFFF;
+          } else {
+            crc = (crc << 1) & 0xFFFF;
+          }
+        }
+      }
+      return crc;
+    }
+  </script>
+</body>
+</html>
