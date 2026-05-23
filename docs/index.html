@@ -9,17 +9,29 @@
   <fieldset>
     <legend>MOTOR1</legend>
     <label>ID:<input type="number" id="motor1Id" value="1" min="1" max="253" style="width: 50px;"></label>
-    <label>LED:</label><input type="checkbox" id="isMotor1Led"/>
-    <label>ENABLE:</label><input type="checkbox" id="isMotor1Enable"/>
-    <label>SPEED: A←</label><input type="range" min="-10" max="10" id="motor1Speed"/>→D
-  </fieldset>
-
+    <label>LED:<input type="checkbox" id="isMotor1Led"/></label>
+    <label>ENABLE:<input type="checkbox" id="isMotor1Enable"/></label>
+    <select id="motor1Mode">
+      <option value="Current">Current</option>
+      <option value="Speed">Speed</option>
+      <option value="Position">Position</option>
+    </select>
+    A←</label><input type="range" min="-10" max="10" id="motor1Slider"/>→D
+    <output id="motor1Value">0</output>
+    </fieldset>
+    
   <fieldset>
     <legend>MOTOR2</legend>
     <label>ID:<input type="number" id="motor2Id" value="2" min="1" max="253" style="width: 50px;"></label>
-    <label>LED:<input type="checkbox" id="isMotor2Led"/>
-    <label>ENABLE:</label><input type="checkbox" id="isMotor2Enable"/>
-    <label>SPEED: J←</label><input type="range" min="-10" max="10" id="motor2Speed"/>→L
+    <label>LED:<input type="checkbox" id="isMotor2Led"/></label>
+    <label>ENABLE:<input type="checkbox" id="isMotor2Enable"/></label>
+    <select id="motor2Mode">
+      <option value="Current">Current</option>
+      <option value="Speed">Speed</option>
+      <option value="Position">Position</option>
+    </select>
+    J←</label><input type="range" min="-10" max="10" id="motor2Slider"/>→L
+    <output id="motor2Value">0</output>
   </fieldset>
 
   <script>
@@ -61,20 +73,172 @@
       packet.set(payload);
       packet[payload.length]     = crc & 0xFF;
       packet[payload.length + 1] = (crc >> 8) & 0xFF;
-
+      // 送信（ポートは閉じずに維持する）
+      await writer.write(packet);
+      console.log(`アドレス ${address} に ${dataValue} を送信しました`);
+    }
+    async function sendWriteCommand2Byte(id, address, dataValue){
+      if(!writer) return;
+      const byte1 = dataValue & 0xFF;
+      const byte2 = (dataValue >> 8) & 0xFF;
+      const payload = new Uint8Array([
+        0xFF, 0xFF, 0xFD, 0x00,
+        id,
+        0x07, 0x00,
+        0x03,
+        address, 0x00,
+        byte1, byte2
+      ]);
+      const crc = calculateDynamixelCRC(payload);
+      const packet = new Uint8Array(payload.length + 2);
+      packet.set(payload);
+      packet[payload.length]     = crc & 0xFF;
+      packet[payload.length + 1] = (crc >> 8) & 0xFF;
+      // 送信（ポートは閉じずに維持する）
+      await writer.write(packet);
+      console.log(`アドレス ${address} に ${dataValue} を送信しました`);
+    }
+    async function sendWriteCommand4Byte(id, address, dataValue){
+      if(!writer) return;
+      const byte1 = dataValue & 0xFF;
+      const byte2 = (dataValue >> 8) & 0xFF;
+      const byte3 = (dataValue >> 16) & 0xFF;
+      const byte4 = (dataValue >> 24) & 0xFF;
+      const payload = new Uint8Array([
+        0xFF, 0xFF, 0xFD, 0x00,
+        id,
+        0x09, 0x00,
+        0x03,
+        address, 0x00,
+        byte1, byte2, byte3, byte4
+      ]);
+      const crc = calculateDynamixelCRC(payload);
+      const packet = new Uint8Array(payload.length + 2);
+      packet.set(payload);
+      packet[payload.length]     = crc & 0xFF;
+      packet[payload.length + 1] = (crc >> 8) & 0xFF;
       // 送信（ポートは閉じずに維持する）
       await writer.write(packet);
       console.log(`アドレス ${address} に ${dataValue} を送信しました`);
     }
 
+    function updateMotor1(value){
+      const mode = document.getElementById('motor1Mode').value;
+      const id = parseInt(document.getElementById('motor1Id').value, 10);
+      if(mode === 'Speed'){
+        sendWriteCommand4Byte(id, 104, value);
+      }else if(mode === 'Position'){
+        sendWriteCommand4Byte(id, 116, value);
+      }else if(mode === 'Current'){
+        sendWriteCommand2Byte(id, 102, value);
+      }
+    }
+    function updateMotor2(value){
+      const mode = document.getElementById('motor2Mode').value;
+      const id = parseInt(document.getElementById('motor2Id').value, 10);
+      if(mode === 'Speed'){
+        sendWriteCommand4Byte(id, 104, value);
+      }else if(mode === 'Position'){
+        sendWriteCommand4Byte(id, 116, value);
+      }else if(mode === 'Current'){
+        sendWriteCommand2Byte(id, 102, value);
+      }
+    }
+
     // 各ボタンのイベント
-    document.getElementById('ledOnBtn').addEventListener('click', () => {
-      sendWriteCommand(1, 0x41, 0x01); // ID:1, Address:65(0x41), Data:1
+    document.getElementById('isMotor1Led').addEventListener('change', (e) => {
+      const id = parseInt(document.getElementById('motor1Id').value, 10);
+      sendWriteCommand(id, 0x41, e.target.checked ? 1 : 0);
+    });
+    document.getElementById('isMotor2Led').addEventListener('change', (e) => {
+      const id = parseInt(document.getElementById('motor2Id').value, 10);
+      sendWriteCommand(id, 0x41, e.target.checked ? 1 : 0);
+    });
+    document.getElementById('isMotor1Enable').addEventListener('change', (e)=>{
+      const id = parseInt(document.getElementById('motor1Id').value, 10);
+      const dataValue = e.target.checked ? 1 : 0;
+      sendWriteCommand(id, 64, dataValue);
+    });
+    document.getElementById('isMotor2Enable').addEventListener('change', (e)=>{
+      const id = parseInt(document.getElementById('motor2Id').value, 10);
+      const dataValue = e.target.checked ? 1 : 0;
+      sendWriteCommand(id, 64, dataValue);
+    });
+    document.getElementById('motor1Slider').addEventListener('input', (e)=>{
+      const val = parseInt(e.target.value, 10);
+      document.getElementById('motor1Value').textContent = val;
+    });
+    document.getElementById('motor2Slider').addEventListener('input', (e)=>{
+      const val = parseInt(e.target.value, 10);
+      document.getElementById('motor2Value').textContent = val;
     });
 
-    document.getElementById('ledOffBtn').addEventListener('click', () => {
-      sendWriteCommand(1, 0x41, 0x00); // ID:1, Address:65(0x41), Data:0
+    document.getElementById('motor1Mode').addEventListener('change', async (e)=>{
+      const id = parseInt(document.getElementById('motor1Id').value, 10);
+      const mode = e.target.value;
+      let modeValue=3;
+      if(mode==="Current")modeValue=0;
+      else if(mode==="Speed")modeValue=1;
+      else if(mode==="Position")modeValue=3;
+      await sendWriteCommand(id, 64, 0);
+      document.getElementById('isMotor1Enable').checked = false;
+      console.log(`モータ${id}のモードを ${mode} (値:${modeValue}) に変更しました`);
     });
+    document.getElementById('motor2Mode').addEventListener('change', async (e)=>{
+      const id = parseInt(document.getElementById('motor2Id').value, 10);
+      const mode = e.target.value;
+      let modeValue=3;
+      if(mode==="Current")modeValue=0;
+      else if(mode==="Speed")modeValue=1;
+      else if(mode==="Position")modeValue=3;
+      await sendWriteCommand(id, 64, 0);
+      document.getElementById('isMotor2Enable').checked = false;
+      await sendWriteCommand(id, 11, modeValue);
+      console.log(`モータ${id}のモードを ${mode} (値:${modeValue}) に変更しました`);
+    });
+
+    //キーボード入力
+    document.addEventListener('keydown', (event)=>{
+      if(event.target.tagName === 'INPUT' && event.target.type !== 'range')return;
+      slider1 = document.getElementById('motor1Slider');
+      slider2 = document.getElementById('motor2Slider');
+      let val1 = parseInt(slider1.value, 10);
+      let val2 = parseInt(slider2.value, 10);
+
+      switch(event.key.toLowerCase()){
+        case 'a':
+          val1 = Math.max(val1 - 1, parseInt(motor1Slider.min, 10));
+          break;
+        case 'd':
+          val1 = Math.min(val1 + 1, parseInt(motor1Slider.max, 10));
+          break;
+        case 's':
+          val1 = 0;
+          break;
+        case 'j':
+          val2 = Math.max(val2 - 1, parseInt(motor2Slider.min, 10));
+          break;
+        case 'l':
+          val2 = Math.min(val2 + 1, parseInt(motor2Slider.max, 10));
+          break;
+        case 'k':
+          val2 = 0;
+          break;
+      }
+
+      if(slider1.value !== val1.toString()){
+        slider1.value = val1;
+        document.getElementById('motor1Value').textContent = val1;
+        updateMotor1(val1);
+        console.log("Motor1 Range:", val1);
+      }
+      if(slider2.value !== val2.toString()){
+        slider2.value = val2;
+        document.getElementById('motor2Value').textContent = val2;
+        updateMotor2(val2);
+        console.log("Motor2 Range:", val2);
+      }
+    })
 
     // CRC-16 計算関数
     function calculateDynamixelCRC(data) {
