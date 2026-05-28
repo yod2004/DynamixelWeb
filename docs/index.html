@@ -20,8 +20,9 @@
     </select>
     A←</label><input type="range" min="-500" max="500" id="motor1Slider"/>→D
     <output id="motor1Value">0</output>
-    </fieldset>
-    
+    <output id="motor1RealValue">0</output>
+  </fieldset>
+  
   <fieldset>
     <legend>MOTOR2</legend>
     <label>ID:<input type="number" id="motor2Id" value="2" min="1" max="253" style="width: 50px;"></label>
@@ -35,19 +36,58 @@
     </select>
     J←</label><input type="range" min="-500" max="500" id="motor2Slider"/>→L
     <output id="motor2Value">0</output>
+    <output id="motor2RealValue">0</output>
+  </fieldset>
+  <fieldset style="margin-top: 20px;">
+    <legend>SCRIPT RUNNER</legend>
+    <input type="file" id="fileInput" accept=".txt">
+    <button id="runScriptBtn">RUN</button>
+    <button id="stopBtn" style="background-color: #ff4444; color: white; font-weight: bold; padding: 5px 15px; border: none; border-radius: 3px; cursor: pointer; margin-left: 10px;">STOP</button>
   </fieldset>
 
   <script>
     let port;
     let writer;
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  // --- ★最終形態：絶対に死なない常時受信バケツループ ---
+    let rxBuffer = new Uint8Array(0);
+    let keepReading = true;
 
-    // 1. 接続処理（ここでのみポップアップが出ます）
+    async function listenToPort() {
+      while (keepReading && port && port.readable) {
+        const reader = port.readable.getReader();
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) {
+              // データが届いたらバケツに追加
+              const newBuf = new Uint8Array(rxBuffer.length + value.length);
+              newBuf.set(rxBuffer);
+              newBuf.set(value, rxBuffer.length);
+              rxBuffer = newBuf;
+              // バケツが溢れないように最新の1024バイトだけ残す
+              if (rxBuffer.length > 1024) rxBuffer = rxBuffer.slice(-1024);
+            }
+          }
+        } catch (error) {
+          // ★ここで通信ノイズ（Framing Error等）を握りつぶして無視する！
+        } finally {
+          reader.releaseLock(); // 確実にロックを外して再スタートの準備
+        }
+        await sleep(10); // 10ミリ秒休んでから、ループの最初に戻って不死鳥のように蘇る
+      }
+    }
+
+    // 1. 接続処理
     document.getElementById('connectBtn').addEventListener('click', async () => {
       try {
         port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 57600 }); // XC330の初期ボーレート
+        await port.open({ baudRate: 57600 });
         writer = port.writable.getWriter();
+        
+        listenToPort(); // ★追加：裏側で不死身のバケツループをスタート！
+        
         console.log("接続完了");
         showMessage("接続完了");
       } catch (error) {
@@ -57,265 +97,118 @@
 
     // 2. コマンド送信処理
     async function sendWriteCommand(id, address, dataValue) {
-      if (!writer) {
-        showMessage("書き込み先が見つかりません");
-        return;
-      }
-
-      // Protocol 2.0 パケット構築 (1バイト書き込み用)
-      const payload = new Uint8Array([
-        0xFF, 0xFF, 0xFD, 0x00, // Header
-        id,                     // ID
-        0x06, 0x00,             // Length (Instruction + Address + Data + CRC = 6)
-        0x03,                   // Instruction (Write)
-        address, 0x00,          // Address
-        dataValue               // Data
-      ]);
-
+      if (!writer) { showMessage("書き込み先が見つかりません"); return; }
+      const payload = new Uint8Array([0xFF, 0xFF, 0xFD, 0x00, id, 0x06, 0x00, 0x03, address, 0x00, dataValue]);
       const crc = calculateDynamixelCRC(payload);
       const packet = new Uint8Array(payload.length + 2);
-      packet.set(payload);
-      packet[payload.length]     = crc & 0xFF;
-      packet[payload.length + 1] = (crc >> 8) & 0xFF;
-      // 送信（ポートは閉じずに維持する）
+      packet.set(payload); packet[payload.length] = crc & 0xFF; packet[payload.length + 1] = (crc >> 8) & 0xFF;
       await writer.write(packet);
-      console.log(`アドレス ${address} に ${dataValue} を送信しました`);
     }
     async function sendWriteCommand2Byte(id, address, dataValue){
       if(!writer) return;
       const unsignedVal = (dataValue < 0) ? dataValue + 65536 : dataValue;
-      const byte1 = dataValue & 0xFF;
-      const byte2 = (dataValue >> 8) & 0xFF;
-      const payload = new Uint8Array([
-        0xFF, 0xFF, 0xFD, 0x00,
-        id,
-        0x07, 0x00,
-        0x03,
-        address, 0x00,
-        byte1, byte2
-      ]);
+      const payload = new Uint8Array([0xFF, 0xFF, 0xFD, 0x00, id, 0x07, 0x00, 0x03, address, 0x00, unsignedVal & 0xFF, (unsignedVal >> 8) & 0xFF]);
       const crc = calculateDynamixelCRC(payload);
       const packet = new Uint8Array(payload.length + 2);
-      packet.set(payload);
-      packet[payload.length]     = crc & 0xFF;
-      packet[payload.length + 1] = (crc >> 8) & 0xFF;
-      // 送信（ポートは閉じずに維持する）
+      packet.set(payload); packet[payload.length] = crc & 0xFF; packet[payload.length + 1] = (crc >> 8) & 0xFF;
       await writer.write(packet);
-      console.log(`アドレス ${address} に ${dataValue} を送信しました`);
     }
     async function sendWriteCommand4Byte(id, address, dataValue){
       if(!writer) return;
       const unsignedVal = dataValue >>> 0;
-      const byte1 = dataValue & 0xFF;
-      const byte2 = (dataValue >> 8) & 0xFF;
-      const byte3 = (dataValue >> 16) & 0xFF;
-      const byte4 = (dataValue >> 24) & 0xFF;
-      const payload = new Uint8Array([
-        0xFF, 0xFF, 0xFD, 0x00,
-        id,
-        0x09, 0x00,
-        0x03,
-        address, 0x00,
-        byte1, byte2, byte3, byte4
-      ]);
+      const payload = new Uint8Array([0xFF, 0xFF, 0xFD, 0x00, id, 0x09, 0x00, 0x03, address, 0x00, unsignedVal & 0xFF, (unsignedVal >> 8) & 0xFF, (unsignedVal >> 16) & 0xFF, (unsignedVal >> 24) & 0xFF]);
       const crc = calculateDynamixelCRC(payload);
       const packet = new Uint8Array(payload.length + 2);
-      packet.set(payload);
-      packet[payload.length]     = crc & 0xFF;
-      packet[payload.length + 1] = (crc >> 8) & 0xFF;
-      // 送信（ポートは閉じずに維持する）
+      packet.set(payload); packet[payload.length] = crc & 0xFF; packet[payload.length + 1] = (crc >> 8) & 0xFF;
       await writer.write(packet);
-      console.log(`アドレス ${address} に ${dataValue} を送信しました`);
     }
 
-    function updateMotor1(value){
+    function updateMotor1(){
       const mode = document.getElementById('motor1Mode').value;
       const id = parseInt(document.getElementById('motor1Id').value, 10);
-      if(mode === 'Speed'){
-        sendWriteCommand4Byte(id, 104, value);
-      }else if(mode === 'Position' || mode === 'ExtendedPosition'){
-        sendWriteCommand4Byte(id, 116, value);
-      }else if(mode === 'Current'){
-        sendWriteCommand2Byte(id, 102, value);
-      }
+      const value = parseInt(document.getElementById('motor1Slider').value, 10);
+      if(mode === 'Speed'){ sendWriteCommand4Byte(id, 104, value);
+      }else if(mode === 'Position' || mode === 'ExtendedPosition'){ sendWriteCommand4Byte(id, 116, value);
+      }else if(mode === 'Current'){ sendWriteCommand2Byte(id, 102, value); }
     }
-    function updateMotor2(value){
+    function updateMotor2(){
       const mode = document.getElementById('motor2Mode').value;
       const id = parseInt(document.getElementById('motor2Id').value, 10);
-      if(mode === 'Speed'){
-        sendWriteCommand4Byte(id, 104, value);
-      }else if(mode === 'Position' || mode === 'ExtendedPosition'){
-        sendWriteCommand4Byte(id, 116, value);
-      }else if(mode === 'Current'){
-        sendWriteCommand2Byte(id, 102, value);
-      }
+      const value = parseInt(document.getElementById('motor2Slider').value, 10);
+      if(mode === 'Speed'){ sendWriteCommand4Byte(id, 104, value);
+      }else if(mode === 'Position' || mode === 'ExtendedPosition'){ sendWriteCommand4Byte(id, 116, value);
+      }else if(mode === 'Current'){ sendWriteCommand2Byte(id, 102, value); }
     }
 
-    // 各ボタンのイベント
     document.getElementById('isMotor1Led').addEventListener('change', (e) => {
-      const id = parseInt(document.getElementById('motor1Id').value, 10);
-      sendWriteCommand(id, 0x41, e.target.checked ? 1 : 0);
+      sendWriteCommand(parseInt(document.getElementById('motor1Id').value, 10), 0x41, e.target.checked ? 1 : 0);
     });
     document.getElementById('isMotor2Led').addEventListener('change', (e) => {
-      const id = parseInt(document.getElementById('motor2Id').value, 10);
-      sendWriteCommand(id, 0x41, e.target.checked ? 1 : 0);
+      sendWriteCommand(parseInt(document.getElementById('motor2Id').value, 10), 0x41, e.target.checked ? 1 : 0);
     });
     document.getElementById('isMotor1Enable').addEventListener('change', (e)=>{
-      const id = parseInt(document.getElementById('motor1Id').value, 10);
-      const dataValue = e.target.checked ? 1 : 0;
-      sendWriteCommand(id, 64, dataValue);
+      sendWriteCommand(parseInt(document.getElementById('motor1Id').value, 10), 64, e.target.checked ? 1 : 0);
     });
     document.getElementById('isMotor2Enable').addEventListener('change', (e)=>{
-      const id = parseInt(document.getElementById('motor2Id').value, 10);
-      const dataValue = e.target.checked ? 1 : 0;
-      sendWriteCommand(id, 64, dataValue);
+      sendWriteCommand(parseInt(document.getElementById('motor2Id').value, 10), 64, e.target.checked ? 1 : 0);
     });
     document.getElementById('motor1Slider').addEventListener('input', (e)=>{
-      const val = parseInt(e.target.value, 10);
-      document.getElementById('motor1Value').textContent = val;
-      updateMotor1(val);
+      document.getElementById('motor1Value').textContent = e.target.value; updateMotor1();
     });
     document.getElementById('motor2Slider').addEventListener('input', (e)=>{
-      const val = parseInt(e.target.value, 10);
-      document.getElementById('motor2Value').textContent = val;
-      updateMotor2(val);
+      document.getElementById('motor2Value').textContent = e.target.value; updateMotor2();
     });
 
-    document.getElementById('motor1Mode').addEventListener('change', async (e)=>{
-      const id = parseInt(document.getElementById('motor1Id').value, 10);
-      const mode = e.target.value;
-      const slider = document.getElementById('motor1Slider');
+    async function changeMode(motorNum) {
+      const id = parseInt(document.getElementById(`motor${motorNum}Id`).value, 10);
+      const mode = document.getElementById(`motor${motorNum}Mode`).value;
+      const slider = document.getElementById(`motor${motorNum}Slider`);
       let modeValue=3;
-      if(mode==="Current")
-      {
-        modeValue=0;
-        slider.min = -910;
-        slider.max = 910;
-        slider.value = 0;
-      }
-      else if(mode==="Speed")
-      {
-        modeValue=1;
-        slider.min = -320;
-        slider.max = 320;
-        slider.value = 0;
-      }
-      else if(mode==="Position")
-      {
-        modeValue=3;
-        slider.min = 0;
-        slider.max = 4095;
-        slider.value = 2048;
-      }
-      else if(mode==="ExtendedPosition")
-      {
-        modeValue=4;
-        slider.min = -4095;
-        slider.max = 4095;
-        slider.value = 0;
-      }
-      document.getElementById('motor1Value').textContent = slider.value;
-      await sendWriteCommand(id, 64, 0);//トルクオフ
-      document.getElementById('isMotor1Enable').checked = false;
+      if(mode==="Current"){ modeValue=0; slider.min = -910; slider.max = 910; slider.value = 0; }
+      else if(mode==="Speed"){ modeValue=1; slider.min = -320; slider.max = 320; slider.value = 0; }
+      else if(mode==="Position"){ modeValue=3; slider.min = 0; slider.max = 4095; slider.value = 2048; }
+      else if(mode==="ExtendedPosition"){ modeValue=4; slider.min = -4095; slider.max = 4095; slider.value = 0; }
+      
+      document.getElementById(`motor${motorNum}Value`).textContent = slider.value;
+      await sendWriteCommand(id, 64, 0); 
+      document.getElementById(`isMotor${motorNum}Enable`).checked = false;
       await sleep(100);
       await sendWriteCommand(id, 11, modeValue);
-      console.log(`モータ${id}のモードを ${mode} (値:${modeValue}) に変更しました`);
-    });
-    document.getElementById('motor2Mode').addEventListener('change', async (e)=>{
-      const id = parseInt(document.getElementById('motor2Id').value, 10);
-      const mode = e.target.value;
-      const slider = document.getElementById('motor2Slider');
-      let modeValue=3;
-      if(mode==="Current")
-      {
-        modeValue=0;
-        slider.min = -910;
-        slider.max = 910;
-        slider.value = 0;
-      }
-      else if(mode==="Speed")
-      {
-        modeValue=1;
-        slider.min = -320;
-        slider.max = 320;
-        slider.value = 0;
-      }
-      else if(mode==="Position")
-      {
-        modeValue=3;
-        slider.min = 0;
-        slider.max = 4095;
-        slider.value = 2048;
-      }
-      else if(mode==="ExtendedPosition")
-      {
-        modeValue=4;
-        slider.min = -4095;
-        slider.max = 4095;
-        slider.value = 0;
-      }
-      document.getElementById('motor2Value').textContent = slider.value;
-      await sendWriteCommand(id, 64, 0);//トルクオフ
-      document.getElementById('isMotor2Enable').checked = false;
-      await sleep(100);
-      await sendWriteCommand(id, 11, modeValue);
-      console.log(`モータ${id}のモードを ${mode} (値:${modeValue}) に変更しました`);
-    });
+      console.log(`モータ${id}のモードを ${mode} に変更しました`);
+    }
+    document.getElementById('motor1Mode').addEventListener('change', () => changeMode(1));
+    document.getElementById('motor2Mode').addEventListener('change', () => changeMode(2));
 
-    //キーボード入力
     document.addEventListener('keydown', (event)=>{
       if(event.target.tagName === 'INPUT' && event.target.type !== 'range')return;
-      slider1 = document.getElementById('motor1Slider');
-      slider2 = document.getElementById('motor2Slider');
+      let slider1 = document.getElementById('motor1Slider');
+      let slider2 = document.getElementById('motor2Slider');
       let val1 = parseInt(slider1.value, 10);
       let val2 = parseInt(slider2.value, 10);
 
       switch(event.key.toLowerCase()){
-        case 'a':
-          val1 = Math.max(val1 - 20, parseInt(motor1Slider.min, 10));
-          break;
-        case 'd':
-          val1 = Math.min(val1 + 20, parseInt(motor1Slider.max, 10));
-          break;
-        case 's':
-          val1 = 0;
-          break;
-        case 'j':
-          val2 = Math.max(val2 - 1, parseInt(motor2Slider.min, 10));
-          break;
-        case 'l':
-          val2 = Math.min(val2 + 1, parseInt(motor2Slider.max, 10));
-          break;
-        case 'k':
-          val2 = 0;
-          break;
+        case 'a': val1 = Math.max(val1 - 20, parseInt(slider1.min, 10)); break;
+        case 'd': val1 = Math.min(val1 + 20, parseInt(slider1.max, 10)); break;
+        case 's': val1 = 0; break;
+        case 'j': val2 = Math.max(val2 - 20, parseInt(slider2.min, 10)); break;
+        case 'l': val2 = Math.min(val2 + 20, parseInt(slider2.max, 10)); break;
+        case 'k': val2 = 0; break;
       }
-
       if(slider1.value !== val1.toString()){
-        slider1.value = val1;
-        document.getElementById('motor1Value').textContent = val1;
-        updateMotor1(val1);
-        console.log("Motor1 Range:", val1);
+        slider1.value = val1; document.getElementById('motor1Value').textContent = val1; updateMotor1();
       }
       if(slider2.value !== val2.toString()){
-        slider2.value = val2;
-        document.getElementById('motor2Value').textContent = val2;
-        updateMotor2(val2);
-        console.log("Motor2 Range:", val2);
+        slider2.value = val2; document.getElementById('motor2Value').textContent = val2; updateMotor2();
       }
-    })
+    });
 
-    // CRC-16 計算関数
     function calculateDynamixelCRC(data) {
       let crc = 0;
       for (let i = 0; i < data.length; i++) {
         crc ^= (data[i] << 8);
         for (let j = 0; j < 8; j++) {
-          if ((crc & 0x8000) !== 0) {
-            crc = ((crc << 1) ^ 0x8005) & 0xFFFF;
-          } else {
-            crc = (crc << 1) & 0xFFFF;
-          }
+          if ((crc & 0x8000) !== 0) crc = ((crc << 1) ^ 0x8005) & 0xFFFF;
+          else crc = (crc << 1) & 0xFFFF;
         }
       }
       return crc;
@@ -326,35 +219,164 @@
       slider.addEventListener('wheel', (event)=>{
         event.preventDefault();
         let val = parseInt(slider.value, 10);
-        const step = 100;
-        if(event.deltaY > 0){
-          val = Math.max(val - step, parseInt(slider.min, 10));
-        }else if(event.deltaY < 0){
-          val = Math.min(val + step, parseInt(slider.max, 10));
-        }
+        const step = 50;
+        if(event.deltaY > 0) val = Math.max(val - step, parseInt(slider.min, 10));
+        else if(event.deltaY < 0) val = Math.min(val + step, parseInt(slider.max, 10));
         if(slider.value !== val.toString()){
-          slider.value = val;
-          document.getElementById(outputId).textContent = val;
-          updateFunc(val);
+          slider.value = val; document.getElementById(outputId).textContent = val; updateFunc(val);
         }
       },{passive: false});
     }
     setupWheelControl('motor1Slider', 'motor1Value', updateMotor1);
     setupWheelControl('motor2Slider', 'motor2Value', updateMotor2);
 
-    // --- ★追加：数秒で自動で消えるメッセージ表示関数 ---
     function showMessage(text) {
       const toast = document.getElementById('toast');
-      toast.textContent = text;
-      toast.style.display = 'block';
-      toast.style.opacity = '1';
-      
-      // 3秒後（3000ミリ秒後）に透明にして、さらにその後に完全に隠す
-      setTimeout(() => {
-        toast.style.opacity = '0';
-        setTimeout(() => toast.style.display = 'none', 300);
-      }, 3000);
+      toast.textContent = text; toast.style.display = 'block'; toast.style.opacity = '1';
+      setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.style.display = 'none', 300); }, 3000);
     }
+
+    // --- ★修正：バケツの中身を覗き込むだけのシンプルな読み取り関数 ---
+    async function readPresentPosition(id) {
+      if (!port || !writer) return null;
+
+      rxBuffer = new Uint8Array(0); // 質問する前にバケツを空っぽにする
+
+      // 質問パケット（Instruction: 0x02, Address: 132）を送信
+      const payload = new Uint8Array([0xFF, 0xFF, 0xFD, 0x00, id, 0x07, 0x00, 0x02, 132, 0x00, 0x04, 0x00]);
+      const crc = calculateDynamixelCRC(payload);
+      const packet = new Uint8Array(payload.length + 2);
+      packet.set(payload); packet[payload.length] = crc & 0xFF; packet[payload.length + 1] = (crc >> 8) & 0xFF;
+      await writer.write(packet);
+
+      // バケツに返事が入るのを待つ（10ms × 15回 = 最大150ms）
+      for (let i = 0; i < 15; i++) {
+        await sleep(10);
+        
+        // 返事（15バイト）がバケツに入っていたら中身をチェック
+        if (rxBuffer.length >= 15) {
+          for (let j = 0; j <= rxBuffer.length - 15; j++) {
+            // ヘッダーとID、ステータス(0x55)が一致するか確認
+            if (rxBuffer[j]===0xFF && rxBuffer[j+1]===0xFF && rxBuffer[j+2]===0xFD && rxBuffer[j+4]===id && rxBuffer[j+7]===0x55) {
+               let rawPos = rxBuffer[j+9] | (rxBuffer[j+10]<<8) | (rxBuffer[j+11]<<16) | (rxBuffer[j+12]<<24);
+               return rawPos | 0; // 見つけたら即座に返す！
+            }
+          }
+        }
+      }
+      return null; // 150ms待っても返事が来なかったらタイムアウト
+    }
+
+    let scriptCommands = [];
+    let isScriptRunning = false;
+    document.getElementById('fileInput').addEventListener('change', (e)=>{
+      if(!e.target.files || e.target.files.length === 0) return;
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = (event)=>{
+        scriptCommands = event.target.result.split('\n').filter(line => line.trim() !== '');
+        showMessage(`ファイルを読み込みました（全${scriptCommands.length}行）`);
+      };
+      reader.readAsText(file);
+    });
+
+    document.getElementById('runScriptBtn').addEventListener('click', async()=>{
+      if(scriptCommands.length === 0){ showMessage("先にテキストファイルを読み込んでください"); return; }
+      isScriptRunning = true;
+      showMessage("スクリプト実行開始");
+      
+      for(let i = 0; i < scriptCommands.length; i++){
+        if(!isScriptRunning){ showMessage("スクリプトを強制中断しました"); break; }
+        
+        const line = scriptCommands[i].trim();
+        const parts = line.split(/\s+/);
+        if(parts.length < 2) continue;
+        
+        const mask = parseInt(parts[0],10);
+        const commandStr = parts[1];
+        const value = parseInt(commandStr,10);
+        const isRelative = commandStr.startsWith('+') || commandStr.startsWith('-');
+        
+        let newVal1, newVal2;
+        
+        if(mask & 1){
+          const slider1 = document.getElementById('motor1Slider');
+          const id1 = parseInt(document.getElementById('motor1Id').value, 10);
+          if(isRelative){
+            let currentPos = await readPresentPosition(id1);
+            if (currentPos === null) currentPos = parseInt(slider1.value,10);
+            newVal1 = currentPos + value;
+          }else{
+            newVal1 = value;
+          }
+          newVal1 = Math.max(parseInt(slider1.min, 10), Math.min(parseInt(slider1.max, 10), newVal1));
+          slider1.value = newVal1; document.getElementById('motor1Value').textContent = newVal1;
+          updateMotor1();
+        }
+        
+        if(mask & 2){
+          const slider2 = document.getElementById('motor2Slider');
+          const id2 = parseInt(document.getElementById('motor2Id').value, 10);
+          if(isRelative){
+            let currentPos = await readPresentPosition(id2);
+            if (currentPos === null) currentPos = parseInt(slider2.value,10);
+            newVal2 = currentPos + value;
+          }else{
+            newVal2 = value;
+          }
+          newVal2 = Math.max(parseInt(slider2.min, 10), Math.min(parseInt(slider2.max, 10), newVal2));
+          slider2.value = newVal2; document.getElementById('motor2Value').textContent = newVal2;
+          updateMotor2();
+        }
+
+        // ★修正：位置決め待機ループ（バグ修正版）
+        let timeoutCounter = 0;
+        while(isScriptRunning){
+          let reached1 = true; // 最初は到達した(true)とする
+          let reached2 = true;
+
+          if ((mask & 1) && newVal1 !== undefined) {
+            let p1 = await readPresentPosition(parseInt(document.getElementById('motor1Id').value, 10));
+            if (p1 !== null) {
+              document.getElementById('motor1RealValue').textContent = p1.toString();
+              if (Math.abs(newVal1 - p1) > 50) reached1 = false; // 離れていたらfalseにする
+            } else {
+              reached1 = false; // 読み取れなかったらfalseにする
+            }
+          }
+          
+          if ((mask & 2) && newVal2 !== undefined) {
+            let p2 = await readPresentPosition(parseInt(document.getElementById('motor2Id').value, 10));
+            if (p2 !== null) {
+              document.getElementById('motor2RealValue').textContent = p2.toString();
+              if (Math.abs(newVal2 - p2) > 50) reached2 = false;
+            } else {
+              reached2 = false;
+            }
+          }
+
+          if (reached1 && reached2) break;
+
+          timeoutCounter++;
+          if (timeoutCounter > 50) break; 
+          await sleep(100);
+        }
+      }
+      
+      if(isScriptRunning){
+        showMessage("スクリプト実行完了");
+        isScriptRunning = false;
+      }
+    });
+
+    document.getElementById('stopBtn').addEventListener('click', ()=>{
+      isScriptRunning = false;
+      const id1 = parseInt(document.getElementById('motor1Id').value, 10);
+      const id2 = parseInt(document.getElementById('motor2Id').value, 10);
+      sendWriteCommand(id1, 64, 0); document.getElementById('isMotor1Enable').checked = false;
+      sendWriteCommand(id2, 64, 0); document.getElementById('isMotor2Enable').checked = false;
+      showMessage("緊急停止しました！(トルクOFF)");
+    });
   </script>
 </body>
 </html>
